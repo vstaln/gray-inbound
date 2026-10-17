@@ -1,0 +1,24 @@
+[package]
+name = "gray-inbound"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+description = "Merged inbound-events plugin for the gray agent harness: send-message, webhooks, file-trigger, control in one sidecar."
+
+[[bin]]
+name = "inbound"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+glob = "0.3"
+
+[profile.release]
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

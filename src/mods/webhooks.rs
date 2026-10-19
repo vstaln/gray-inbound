@@ -294,8 +294,12 @@ fn handle_conn(sh: &Arc<Shared>, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
     let (status, payload) = match read_request(&mut stream) {
-        Ok((method, path, content_type, body)) => {
-            dispatch_request(sh, &method, &path, &content_type, &body)
+        Ok((method, path, content_type, body, host, origin)) => {
+            if browser_origin(&host, &origin) {
+                (403, json!({"ok": false, "error": "browser-origin request rejected"}))
+            } else {
+                dispatch_request(sh, &method, &path, &content_type, &body)
+            }
         }
         Err(e) => (400, json!({"ok": false, "error": e})),
     };
@@ -309,7 +313,26 @@ fn handle_conn(sh: &Arc<Shared>, mut stream: TcpStream) {
     let _ = stream.flush();
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, String), String> {
+/// The listener is loopback but browsers can still reach it: a cross-site
+/// POST (form or fetch) carries Origin of the attacking page, and DNS
+/// rebinding arrives with a foreign Host. Bodies land in the agent's queue,
+/// so anything browser-shaped is refused outright.
+fn browser_origin(host: &str, origin: &str) -> bool {
+    if !origin.is_empty() {
+        let o = origin.trim_end_matches('/').to_lowercase();
+        return !(o.starts_with("http://127.0.0.1")
+            || o.starts_with("http://localhost")
+            || o.starts_with("https://127.0.0.1")
+            || o.starts_with("https://localhost")
+            || o.starts_with("http://[::1]")
+            || o.starts_with("https://[::1]"));
+    }
+    let h = host.trim().trim_start_matches('[').split(|c| c == ']' || c == ':').next()
+        .unwrap_or("").to_lowercase();
+    !(h.is_empty() || h == "127.0.0.1" || h == "localhost" || h == "::1")
+}
+
+fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, String, String, String), String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -333,6 +356,8 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, Strin
     let path = parts.next().unwrap_or("").to_string();
     let mut content_len = 0usize;
     let mut content_type = String::new();
+    let mut host = String::new();
+    let mut origin = String::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
             let k = k.trim().to_lowercase();
@@ -340,6 +365,10 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, Strin
                 content_len = v.trim().parse().unwrap_or(0);
             } else if k == "content-type" {
                 content_type = v.trim().to_string();
+            } else if k == "host" {
+                host = v.trim().to_string();
+            } else if k == "origin" {
+                origin = v.trim().to_string();
             }
         }
     }
@@ -353,7 +382,14 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, Strin
         body.extend_from_slice(&chunk[..n]);
     }
     body.truncate(want);
-    Ok((method, path, content_type, String::from_utf8_lossy(&body).to_string()))
+    Ok((
+        method,
+        path,
+        content_type,
+        String::from_utf8_lossy(&body).to_string(),
+        host,
+        origin,
+    ))
 }
 
 fn dispatch_request(sh: &Arc<Shared>, method: &str, raw_path: &str, content_type: &str, body: &str) -> (u16, Value) {

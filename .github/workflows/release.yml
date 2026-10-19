@@ -1,0 +1,89 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            rustflags: ''
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            rustflags: ''
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: '-Ctarget-feature=+crt-static'
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            rustflags: ''
+          - os: macos-15
+            target: aarch64-apple-darwin
+            rustflags: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check tag matches package version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Install Linux musl linker
+        if: runner.os == 'Linux'
+        run: sudo -n apt-get update && sudo -n apt-get install -y musl-tools
+      - name: Test
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          CARGO_BUILD_JOBS: '4'
+        run: cargo test --locked
+      - name: Build
+        env:
+          CARGO_BUILD_JOBS: '4'
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p "stage/${{ matrix.target }}"
+          ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/inbound$ext" "stage/${{ matrix.target }}/inbound$ext"
+          chmod 755 "stage/${{ matrix.target }}/inbound$ext"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leg-${{ matrix.target }}
+          path: stage
+  pack:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: stage
+          merge-multiple: true
+      - name: Pack tarball and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir -p dist
+          cp plugin.sh stage/plugin.sh
+          find stage -type f -exec chmod 755 {} +
+          tar --owner=0 --group=0 --numeric-owner --mtime=@0 --sort=name -cf - \
+            -C stage plugin.sh \
+            aarch64-apple-darwin aarch64-unknown-linux-musl \
+            x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-musl \
+            | gzip -n -9 > "dist/gray-inbound-${version}.tar.gz"
+          cd dist
+          shasum -a 256 "gray-inbound-${version}.tar.gz" > "gray-inbound-${version}.tar.gz.sha256"
+          gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

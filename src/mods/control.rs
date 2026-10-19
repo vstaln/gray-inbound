@@ -2,7 +2,10 @@
 //! gray-control — per-session remote control over a unix socket.
 //!
 //! Each session binds `~/.gray/control/<sid>.sock` (lazily, on the first
-//! hook that names a session) serving line-delimited JSON-RPC:
+//! hook that names a session) serving line-delimited JSON-RPC. On unix
+//! `<sid>.sock` is a bound AF_UNIX socket; on other platforms it is a
+//! small file holding the port of a 127.0.0.1 TCP listener, so discovery
+//! still works by globbing the control dir:
 //!
 //!   {"method":"send","text":"..."}  → enqueue for the NEXT agent/before_start
 //!                                     {text} injection (the reliable path),
@@ -13,9 +16,12 @@
 //!
 //! `send_to_session` {sid, text} writes to another session's socket (list
 //! sockets = glob the control dir). `/control` prints the socket path and an
-//! `nc -U` usage line. The socket file is removed on plugin/shutdown.
+//! `nc` usage line. The socket file is removed on plugin/shutdown.
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(not(unix))]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,10 +32,18 @@ use serde_json::{Value, json};
 
 // ---------- state -------------------------------------------------------------
 
+/// The user's home dir: `$HOME`, or `%USERPROFILE%` on Windows where
+/// HOME is typically unset for a natively-spawned process.
+fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn gray_home() -> PathBuf {
     std::env::var_os("GRAY_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gray")))
+        .or_else(|| user_home().map(|h| h.join(".gray")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -128,6 +142,61 @@ fn host_send(out: &Arc<Mutex<std::io::Stdout>>, method: &str, params: Value, id:
 
 // ---------- socket listener ---------------------------------------------------
 
+/// Control transport: an `AF_UNIX` socket bound at `<sid>.sock` on unix; a
+/// loopback TCP listener elsewhere — its port is written into the same
+/// `<sid>.sock` rendezvous file, so discovery still globs the control dir.
+#[cfg(unix)]
+type Listener = UnixListener;
+#[cfg(not(unix))]
+type Listener = TcpListener;
+#[cfg(unix)]
+type Stream = UnixStream;
+#[cfg(not(unix))]
+type Stream = TcpStream;
+
+#[cfg(unix)]
+fn bind_control(sock: &PathBuf) -> std::io::Result<Listener> {
+    let _ = std::fs::remove_file(sock); // stale socket from a dead run
+    UnixListener::bind(sock)
+}
+
+#[cfg(not(unix))]
+fn bind_control(sock: &PathBuf) -> std::io::Result<Listener> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    std::fs::write(sock, listener.local_addr()?.port().to_string())?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn connect_control(sock: &PathBuf) -> std::io::Result<Stream> {
+    UnixStream::connect(sock)
+}
+
+#[cfg(not(unix))]
+fn connect_control(sock: &PathBuf) -> std::io::Result<Stream> {
+    let port: u16 = std::fs::read_to_string(sock)?
+        .trim()
+        .parse()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad control port file"))?;
+    TcpStream::connect(("127.0.0.1", port))
+}
+
+/// The one-line client hint `/control` prints.
+#[cfg(unix)]
+fn usage_line(sock: &PathBuf) -> String {
+    format!("echo '{{\"method\":\"send\",\"text\":\"hi\"}}' | nc -U {}", sock.display())
+}
+
+#[cfg(not(unix))]
+fn usage_line(sock: &PathBuf) -> String {
+    let port = std::fs::read_to_string(sock)
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "<port>".into());
+    format!("echo {{\"method\":\"send\",\"text\":\"hi\"}} | nc 127.0.0.1 {port}")
+}
+
 pub fn ensure_listener(sh: &Arc<Shared>) {
     if sh.listener_up.swap(true, Ordering::SeqCst) {
         return;
@@ -143,8 +212,7 @@ pub fn ensure_listener(sh: &Arc<Shared>) {
         return;
     }
     let sock = dir.join(format!("{}.sock", sanitize(&sid)));
-    let _ = std::fs::remove_file(&sock); // stale socket from a dead run
-    match UnixListener::bind(&sock) {
+    match bind_control(&sock) {
         Ok(listener) => {
             sh.session.lock().expect("session").sock = Some(sock.clone());
             let sh2 = sh.clone();
@@ -157,7 +225,7 @@ pub fn ensure_listener(sh: &Arc<Shared>) {
     }
 }
 
-fn accept_loop(sh: Arc<Shared>, listener: UnixListener, sock: PathBuf) {
+fn accept_loop(sh: Arc<Shared>, listener: Listener, sock: PathBuf) {
     let _ = listener.set_nonblocking(true);
     while !sh.stop.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -171,7 +239,7 @@ fn accept_loop(sh: Arc<Shared>, listener: UnixListener, sock: PathBuf) {
     let _ = std::fs::remove_file(&sock);
 }
 
-fn handle_conn(sh: &Arc<Shared>, stream: UnixStream) {
+fn handle_conn(sh: &Arc<Shared>, stream: Stream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
     let Ok(mut w) = stream.try_clone() else { return };
     for line in BufReader::new(stream).lines() {
@@ -280,7 +348,7 @@ fn send_to_session(args: &Value) -> Result<String, String> {
             format!("no control socket for '{sid}' — live sessions: {}", others.join(", "))
         });
     }
-    let mut stream = UnixStream::connect(&sock)
+    let mut stream = connect_control(&sock)
         .map_err(|e| format!("couldn't connect to {}: {e}", sock.display()))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let req = json!({"method": "send", "text": text, "id": "send_to_session"});
@@ -328,11 +396,11 @@ fn run_command(sh: &Arc<Shared>, argv: &[&str]) -> String {
                 "not bound yet".to_string()
             };
             format!(
-                "gray-control {} — {}\nsock: {}\nusage: echo '{{\"method\":\"send\",\"text\":\"hi\"}}' | nc -U {}\nmethods: send {{text}} · status · stop — also: /control list, /control stop",
+                "gray-control {} — {}\nsock: {}\nusage: {}\nmethods: send {{text}} · status · stop — also: /control list, /control stop",
                 env!("CARGO_PKG_VERSION"),
                 listening,
                 sock.display(),
-                sock.display(),
+                usage_line(&sock),
             )
         }
     }

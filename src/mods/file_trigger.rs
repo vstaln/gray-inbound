@@ -28,10 +28,18 @@ pub struct Rule {
     message: String,
 }
 
+/// The user's home dir: `$HOME`, or `%USERPROFILE%` on Windows where
+/// HOME is typically unset for a natively-spawned process.
+fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn gray_home() -> PathBuf {
     std::env::var_os("GRAY_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gray")))
+        .or_else(|| user_home().map(|h| h.join(".gray")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

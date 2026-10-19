@@ -175,7 +175,7 @@ fn inbound_command(st: &Inbound) -> String {
          \x20 /tell      queue a message for the next turn (~/.gray/send-message/)\n\
          \x20 /webhook   HTTP webhooks → turns ({})\n\
          \x20 /trigger   per-path reminders appended to write results (~/.gray/file-trigger/rules.json)\n\
-         \x20 /control   unix-socket remote control (sock: {})\n\
+         \x20 /control   remote control socket (sock: {})\n\
          tools: webhook_emit · send_to_session",
         env!("CARGO_PKG_VERSION"),
         webhooks::listener_state(&st.wh),

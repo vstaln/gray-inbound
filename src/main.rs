@@ -80,6 +80,13 @@ fn manifest() -> Value {
         "capabilities": caps,
         "tools": tools,
         "commands": commands,
+        "command_descriptions": {
+            "/tell": "queue a message for the next turn",
+            "/webhook": "add and inspect inbound webhooks",
+            "/trigger": "list or reload per-path reminder rules",
+            "/control": "show and manage the remote-control socket",
+            "/inbound": "list the inbound message sources",
+        },
         "hooks": hooks,
     })
 }

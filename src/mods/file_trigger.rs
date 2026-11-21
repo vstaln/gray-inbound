@@ -18,7 +18,13 @@ use serde_json::{Value, json};
 
 /// Write-shaped tools whose path arg triggers rules.
 const WRITE_TOOLS: &[&str] = &[
-    "write", "edit", "patch", "write_file", "apply_patch", "multi_edit", "notebook_edit",
+    "write",
+    "edit",
+    "patch",
+    "write_file",
+    "apply_patch",
+    "multi_edit",
+    "notebook_edit",
 ];
 
 #[derive(Debug, Clone)]
@@ -87,7 +93,11 @@ fn session_key(params: &Value) -> (String, String) {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     (sid, name)
 }
 
@@ -147,16 +157,29 @@ fn run_command(state: &State, argv: &[&str]) -> String {
             let fresh = load_rules();
             let n = fresh.len();
             *state.rules.lock().expect("rules") = fresh;
-            format!("reloaded {} rule{} from {}", n, if n == 1 { "" } else { "s" }, rules_path().display())
+            format!(
+                "reloaded {} rule{} from {}",
+                n,
+                if n == 1 { "" } else { "s" },
+                rules_path().display()
+            )
         }
         Some("list") | None => {
             let rules = state.rules.lock().expect("rules");
             if rules.is_empty() {
                 format!("no rules — add them to {}", rules_path().display())
             } else {
-                let mut lines = vec![format!("{} rule{}:", rules.len(), if rules.len() == 1 { "" } else { "s" })];
+                let mut lines = vec![format!(
+                    "{} rule{}:",
+                    rules.len(),
+                    if rules.len() == 1 { "" } else { "s" }
+                )];
                 for r in rules.iter() {
-                    let ok = if r.pattern.is_some() { "" } else { " (invalid glob)" };
+                    let ok = if r.pattern.is_some() {
+                        ""
+                    } else {
+                        " (invalid glob)"
+                    };
                     lines.push(format!("  {}{} → {}", r.glob, ok, r.message));
                 }
                 lines.join("\n")
@@ -220,7 +243,9 @@ fn main_file_trigger() -> std::io::Result<()> {
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let line = line?;
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let (reply, exit) = handle_file_trigger(&state, &req);
         if let Some(reply) = reply {
             writeln!(stdout, "{reply}")?;
@@ -253,9 +278,12 @@ mod tests {
     }
 
     fn call(state: &State, method: &str, params: Value) -> Value {
-        handle_file_trigger(state, &json!({ "id": 1, "method": method, "params": params }))
-            .0
-            .unwrap()
+        handle_file_trigger(
+            state,
+            &json!({ "id": 1, "method": method, "params": params }),
+        )
+        .0
+        .unwrap()
     }
 
     #[test]
@@ -322,7 +350,10 @@ mod tests {
 
     #[test]
     fn multiple_matches_join() {
-        let s = state_with(vec![rule("**/*.rs", "fmt"), rule("src/**", "check clippy too")]);
+        let s = state_with(vec![
+            rule("**/*.rs", "fmt"),
+            rule("src/**", "check clippy too"),
+        ]);
         call(
             &s,
             "tool/before",
@@ -340,7 +371,11 @@ mod tests {
     #[test]
     fn command_lists_rules() {
         let s = state_with(vec![rule("**/*.rs", "fmt")]);
-        let r = call(&s, "command/run", json!({"name": "/trigger", "argv": ["list"]}));
+        let r = call(
+            &s,
+            "command/run",
+            json!({"name": "/trigger", "argv": ["list"]}),
+        );
         assert!(r["result"]["text"].as_str().unwrap().contains("**/*.rs"));
     }
 }

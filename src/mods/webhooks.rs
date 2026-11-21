@@ -83,13 +83,22 @@ fn configured_port() -> u16 {
 fn sanitize(s: &str) -> String {
     let s: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if s.is_empty() { "webhook".into() } else { s }
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ---------- routes ----------------------------------------------------------------
@@ -102,9 +111,15 @@ pub struct Route {
 
 /// name → route, persisted at ~/.gray/webhooks/routes.json.
 fn load_routes() -> BTreeMap<String, Route> {
-    let Ok(raw) = std::fs::read_to_string(routes_path()) else { return BTreeMap::new() };
-    let Ok(v) = serde_json::from_str::<Value>(&raw) else { return BTreeMap::new() };
-    let Some(map) = v.as_object() else { return BTreeMap::new() };
+    let Ok(raw) = std::fs::read_to_string(routes_path()) else {
+        return BTreeMap::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return BTreeMap::new();
+    };
+    let Some(map) = v.as_object() else {
+        return BTreeMap::new();
+    };
     map.iter()
         .filter_map(|(name, r)| {
             let path = r.get("path").and_then(Value::as_str)?.to_string();
@@ -118,23 +133,36 @@ fn save_routes(routes: &BTreeMap<String, Route>) -> Result<(), String> {
     std::fs::create_dir_all(hooks_dir()).map_err(|e| e.to_string())?;
     let v: Value = routes
         .iter()
-        .map(|(n, r)| (n.clone(), json!({"path": r.path, "created_at": r.created_at})))
+        .map(|(n, r)| {
+            (
+                n.clone(),
+                json!({"path": r.path, "created_at": r.created_at}),
+            )
+        })
         .collect::<serde_json::Map<String, Value>>()
         .into();
-    std::fs::write(routes_path(), serde_json::to_string_pretty(&v).unwrap()).map_err(|e| e.to_string())
+    std::fs::write(routes_path(), serde_json::to_string_pretty(&v).unwrap())
+        .map_err(|e| e.to_string())
 }
 
 fn normalize_path(p: &str) -> Option<String> {
     let p = p.trim();
-    let p = if p.starts_with('/') { p.to_string() } else { format!("/{p}") };
-    if p.len() < 2 || p.contains('?') || p.contains(' ') || !p.chars().all(|c| c.is_ascii()) {
+    let p = if p.starts_with('/') {
+        p.to_string()
+    } else {
+        format!("/{p}")
+    };
+    if p.len() < 2 || p.contains('?') || p.contains(' ') || !p.is_ascii() {
         return None;
     }
     Some(p)
 }
 
 fn valid_name(n: &str) -> bool {
-    !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    !n.is_empty()
+        && n.len() <= 64
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 // ---------- shared state ------------------------------------------------------------
@@ -196,7 +224,10 @@ fn host_run(sh: &Shared, prompt: &str) -> Result<String, String> {
             if let Some(e) = v.pointer("/error/message").and_then(Value::as_str) {
                 return Err(e.to_string());
             }
-            Ok(v.pointer("/result/text").and_then(Value::as_str).unwrap_or("").to_string())
+            Ok(v.pointer("/result/text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string())
         }
     }
 }
@@ -231,7 +262,9 @@ fn append_delivery(name: &str, body: &str, content_type: &str, via: &str) -> Res
 
 fn tail_log(name: &str) -> Vec<String> {
     let path = log_dir().join(format!("{}.jsonl", sanitize(name)));
-    let Ok(raw) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     lines
         .iter()
@@ -296,7 +329,10 @@ fn handle_conn(sh: &Arc<Shared>, mut stream: TcpStream) {
     let (status, payload) = match read_request(&mut stream) {
         Ok((method, path, content_type, body, host, origin)) => {
             if browser_origin(&host, &origin) {
-                (403, json!({"ok": false, "error": "browser-origin request rejected"}))
+                (
+                    403,
+                    json!({"ok": false, "error": "browser-origin request rejected"}),
+                )
             } else {
                 dispatch_request(sh, &method, &path, &content_type, &body)
             }
@@ -327,12 +363,19 @@ fn browser_origin(host: &str, origin: &str) -> bool {
             || o.starts_with("http://[::1]")
             || o.starts_with("https://[::1]"));
     }
-    let h = host.trim().trim_start_matches('[').split(|c| c == ']' || c == ':').next()
-        .unwrap_or("").to_lowercase();
+    let h = host
+        .trim()
+        .trim_start_matches('[')
+        .split([']', ':'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     !(h.is_empty() || h == "127.0.0.1" || h == "localhost" || h == "::1")
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, String, String, String), String> {
+fn read_request(
+    stream: &mut TcpStream,
+) -> Result<(String, String, String, String, String, String), String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -375,7 +418,9 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, Strin
     let want = content_len.min(BODY_CAP);
     let mut body = buf[head_end..].to_vec();
     while body.len() < want {
-        let n = stream.read(&mut chunk).map_err(|e| format!("read body: {e}"))?;
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("read body: {e}"))?;
         if n == 0 {
             break;
         }
@@ -392,7 +437,13 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String, String, Strin
     ))
 }
 
-fn dispatch_request(sh: &Arc<Shared>, method: &str, raw_path: &str, content_type: &str, body: &str) -> (u16, Value) {
+fn dispatch_request(
+    sh: &Arc<Shared>,
+    method: &str,
+    raw_path: &str,
+    content_type: &str,
+    body: &str,
+) -> (u16, Value) {
     if method != "POST" {
         return (405, json!({"ok": false, "error": "POST only"}));
     }
@@ -409,7 +460,10 @@ fn dispatch_request(sh: &Arc<Shared>, method: &str, raw_path: &str, content_type
             let via = deliver(sh, &name, body, content_type);
             (200, json!({"ok": true, "name": name, "delivered": via}))
         }
-        None => (404, json!({"ok": false, "error": format!("no route for {path}")})),
+        None => (
+            404,
+            json!({"ok": false, "error": format!("no route for {path}")}),
+        ),
     }
 }
 
@@ -429,11 +483,19 @@ fn before_start(sh: &Arc<Shared>) -> Value {
 }
 
 fn emit(sh: &Arc<Shared>, args: &Value) -> Result<String, String> {
-    let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     if name.is_empty() {
         return Err("missing required argument: name".into());
     }
-    let body = args.get("body").and_then(Value::as_str).unwrap_or("").to_string();
+    let body = args
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if !sh.routes.lock().expect("routes").contains_key(name) {
         let names: Vec<String> = sh.routes.lock().expect("routes").keys().cloned().collect();
         return Err(if names.is_empty() {
@@ -466,13 +528,23 @@ fn run_command(sh: &Arc<Shared>, argv: &[&str]) -> String {
                 return format!("bad name '{name}' — letters, digits, - and _ only (≤64 chars)");
             }
             let Some(path) = normalize_path(path) else {
-                return format!("bad path — need something like /deploy or /ci-done (no spaces, no query)");
+                return "bad path — need something like /deploy or /ci-done (no spaces, no query)"
+                    .to_string();
             };
             let mut routes = sh.routes.lock().expect("routes");
-            if let Some((other, _)) = routes.iter().find(|(n, r)| n.as_str() != name && r.path == path) {
+            if let Some((other, _)) = routes
+                .iter()
+                .find(|(n, r)| n.as_str() != name && r.path == path)
+            {
                 return format!("path {path} is already taken by '{other}'");
             }
-            routes.insert(name.to_string(), Route { path: path.clone(), created_at: now() });
+            routes.insert(
+                name.to_string(),
+                Route {
+                    path: path.clone(),
+                    created_at: now(),
+                },
+            );
             let res = save_routes(&routes);
             drop(routes);
             ensure_listener(sh);
@@ -485,7 +557,10 @@ fn run_command(sh: &Arc<Shared>, argv: &[&str]) -> String {
                         None => String::new(),
                     }
                 ),
-                Err(e) => format!("route added but couldn't save {}: {e}", routes_path().display()),
+                Err(e) => format!(
+                    "route added but couldn't save {}: {e}",
+                    routes_path().display()
+                ),
             }
         }
         Some("rm") | Some("remove") => {
@@ -509,7 +584,11 @@ fn run_command(sh: &Arc<Shared>, argv: &[&str]) -> String {
             if lines.is_empty() {
                 format!("no deliveries logged for '{name}'")
             } else {
-                format!("last {} deliveries for '{name}':\n{}", lines.len(), lines.join("\n"))
+                format!(
+                    "last {} deliveries for '{name}':\n{}",
+                    lines.len(),
+                    lines.join("\n")
+                )
             }
         }
         Some("list") | Some("ls") | None | Some("status") => {
@@ -527,7 +606,8 @@ fn run_command(sh: &Arc<Shared>, argv: &[&str]) -> String {
                     lines.push(format!("  {n:20} POST {}", r.path));
                 }
             }
-            lines.push("also: /webhook rm <name> · /webhook tail <name> · tool webhook_emit".into());
+            lines
+                .push("also: /webhook rm <name> · /webhook tail <name> · tool webhook_emit".into());
             lines.join("\n")
         }
         _ => "usage: /webhook add <name> <path> | list | rm <name> | tail <name>".into(),
@@ -621,7 +701,9 @@ fn main_webhooks() {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
             if v.get("method").is_none()
                 && let Some(id) = v.get("id").and_then(Value::as_str)
             {
@@ -660,14 +742,19 @@ mod tests {
     }
 
     fn call(sh: &Arc<Shared>, method: &str, params: Value) -> Value {
-        handle_webhooks(sh, &json!({ "id": 1, "method": method, "params": params })).0.unwrap()
+        handle_webhooks(sh, &json!({ "id": 1, "method": method, "params": params }))
+            .0
+            .unwrap()
     }
 
     fn routed(name: &str, path: &str) -> Arc<Shared> {
         let sh = shared();
         sh.routes.lock().unwrap().insert(
             name.to_string(),
-            Route { path: path.to_string(), created_at: 1 },
+            Route {
+                path: path.to_string(),
+                created_at: 1,
+            },
         );
         sh
     }
@@ -704,10 +791,21 @@ mod tests {
         let sh = routed("ci", "/ci");
         dispatch_request(&sh, "POST", "/ci", "", "green");
         dispatch_request(&sh, "POST", "/ci", "", "again");
-        let r = call(&sh, "agent/before_start", json!({"session":{"id":"s","cwd":"/tmp"}}));
+        let r = call(
+            &sh,
+            "agent/before_start",
+            json!({"session":{"id":"s","cwd":"/tmp"}}),
+        );
         let t = r["result"]["text"].as_str().unwrap();
-        assert!(t.contains("Webhook ci fired: green") && t.contains("Webhook ci fired: again"), "{t}");
-        let r = call(&sh, "agent/before_start", json!({"session":{"id":"s","cwd":"/tmp"}}));
+        assert!(
+            t.contains("Webhook ci fired: green") && t.contains("Webhook ci fired: again"),
+            "{t}"
+        );
+        let r = call(
+            &sh,
+            "agent/before_start",
+            json!({"session":{"id":"s","cwd":"/tmp"}}),
+        );
         assert_eq!(r["result"], json!({}));
     }
 
@@ -715,7 +813,11 @@ mod tests {
     fn emit_validates_and_delivers() {
         let sh = routed("me", "/me");
         assert!(emit(&sh, &json!({})).unwrap_err().contains("name"));
-        assert!(emit(&sh, &json!({"name":"ghost"})).unwrap_err().contains("no route"));
+        assert!(
+            emit(&sh, &json!({"name":"ghost"}))
+                .unwrap_err()
+                .contains("no route")
+        );
         let ok = emit(&sh, &json!({"name":"me","body":"hi"})).unwrap();
         assert!(ok.contains("queued"), "{ok}");
     }
@@ -735,9 +837,17 @@ mod tests {
     fn add_list_rm_flow() {
         // routes_path is env-derived; exercise the in-memory command path only
         let sh = shared();
-        let r = call(&sh, "command/run", json!({"name":"/webhook","argv":["add","a b","/x"]}));
+        let r = call(
+            &sh,
+            "command/run",
+            json!({"name":"/webhook","argv":["add","a b","/x"]}),
+        );
         assert!(r["result"]["text"].as_str().unwrap().contains("bad name"));
-        let r = call(&sh, "command/run", json!({"name":"/webhook","argv":["rm","ghost"]}));
+        let r = call(
+            &sh,
+            "command/run",
+            json!({"name":"/webhook","argv":["rm","ghost"]}),
+        );
         assert!(r["result"]["text"].as_str().unwrap().contains("no route"));
     }
 
@@ -750,7 +860,11 @@ mod tests {
         let path = dir.join("n.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
         for i in 0..12 {
-            writeln!(f, r#"{{"ts":{i},"body":"b{i}","content_type":"t","via":"queued"}}"#).unwrap();
+            writeln!(
+                f,
+                r#"{{"ts":{i},"body":"b{i}","content_type":"t","via":"queued"}}"#
+            )
+            .unwrap();
         }
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .unwrap()

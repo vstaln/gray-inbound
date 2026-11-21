@@ -31,12 +31,16 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use serde_json::{Value, json};
 
+#[allow(dead_code)]
 #[path = "mods/control.rs"]
 mod control;
+#[allow(dead_code)]
 #[path = "mods/file_trigger.rs"]
 mod file_trigger;
+#[allow(dead_code)]
 #[path = "mods/send_message.rs"]
 mod send_message;
+#[allow(dead_code)]
 #[path = "mods/webhooks.rs"]
 mod webhooks;
 
@@ -63,7 +67,12 @@ fn manifest() -> Value {
         }
     };
     for m in &parts {
-        for t in m.get("tools").and_then(Value::as_array).into_iter().flatten() {
+        for t in m
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if !tools.iter().any(|x| x.get("name") == t.get("name")) {
                 tools.push(t.clone());
             }
@@ -109,14 +118,24 @@ impl Inbound {
             stash: Mutex::new(HashMap::new()),
             rules: Mutex::new(file_trigger::load_rules()),
         };
-        Self { wh: Arc::new(wh), ctl: Arc::new(ctl), ft }
+        Self {
+            wh: Arc::new(wh),
+            ctl: Arc::new(ctl),
+            ft,
+        }
     }
 
     fn send_message(&self, req: &Value) -> (Option<Value>, bool) {
         let wh = &self.wh;
         let mut say = |t: &str| {
-            send_message::host_call(&wh.out, &wh.pending, &wh.counter, "host/say", json!({ "text": t }))
-                .map(|_| ())
+            send_message::host_call(
+                &wh.out,
+                &wh.pending,
+                &wh.counter,
+                "host/say",
+                json!({ "text": t }),
+            )
+            .map(|_| ())
         };
         send_message::handle_send_message(req, &mut say)
     }
@@ -155,7 +174,12 @@ fn before_start(st: &Inbound, req: &Value) -> Value {
     let parts: Vec<String> = replies
         .into_iter()
         .filter_map(|r| {
-            let t = r?.get("result")?.get("text")?.as_str()?.trim_end().to_string();
+            let t = r?
+                .get("result")?
+                .get("text")?
+                .as_str()?
+                .trim_end()
+                .to_string();
             (!t.is_empty()).then_some(t)
         })
         .collect();
@@ -217,7 +241,8 @@ fn handle(st: &Inbound, req: &Value) -> (Option<Value>, bool) {
                 "webhook_emit" => webhooks::handle_webhooks(&st.wh, req),
                 "send_to_session" => control::handle_control(&st.ctl, req),
                 other => {
-                    let r = json!({ "content": format!("unknown tool: {other}"), "is_error": true });
+                    let r =
+                        json!({ "content": format!("unknown tool: {other}"), "is_error": true });
                     return (Some(json!({ "id": id, "result": r })), false);
                 }
             };
@@ -263,7 +288,9 @@ fn main() {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
             if v.get("method").is_none()
                 && let Some(id) = v.get("id").and_then(Value::as_str)
             {

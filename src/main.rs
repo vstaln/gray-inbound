@@ -31,6 +31,8 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use serde_json::{Value, json};
 
+mod parts;
+
 #[allow(dead_code)]
 #[path = "mods/control.rs"]
 mod control;
@@ -46,15 +48,45 @@ mod webhooks;
 
 const META_COMMAND: &str = "/inbound";
 
+const PARTS: &[parts::Part] = &[
+    parts::Part {
+        name: "send-message",
+        default: true,
+        description: "queue /tell messages for the next turn",
+    },
+    parts::Part {
+        name: "webhooks",
+        default: true,
+        description: "local HTTP webhooks that start turns",
+    },
+    parts::Part {
+        name: "file-trigger",
+        default: true,
+        description: "per-path reminders appended to write results",
+    },
+    parts::Part {
+        name: "control",
+        default: true,
+        description: "unix-socket remote control and send_to_session",
+    },
+];
+
 /// Union of the constituent manifests (tools dedup by name — no collisions
 /// today), plus the `/inbound` meta command.
-fn manifest() -> Value {
-    let parts = [
-        send_message::manifest_send_message(),
-        webhooks::manifest_webhooks(),
-        file_trigger::manifest_file_trigger(),
-        control::manifest_control(),
-    ];
+fn manifest(parts: &parts::Parts) -> Value {
+    let mut sources = Vec::new();
+    if parts.on("send-message") {
+        sources.push(send_message::manifest_send_message());
+    }
+    if parts.on("webhooks") {
+        sources.push(webhooks::manifest_webhooks());
+    }
+    if parts.on("file-trigger") {
+        sources.push(file_trigger::manifest_file_trigger());
+    }
+    if parts.on("control") {
+        sources.push(control::manifest_control());
+    }
     let mut tools: Vec<Value> = Vec::new();
     let mut commands: Vec<Value> = Vec::new();
     let mut hooks: Vec<Value> = Vec::new();
@@ -66,7 +98,7 @@ fn manifest() -> Value {
             }
         }
     };
-    for m in &parts {
+    for m in &sources {
         for t in m
             .get("tools")
             .and_then(Value::as_array)
@@ -82,6 +114,29 @@ fn manifest() -> Value {
         union(&mut caps, m.get("capabilities"));
     }
     commands.push(json!(META_COMMAND));
+    let mut descriptions = serde_json::Map::new();
+    descriptions.insert(
+        META_COMMAND.into(),
+        json!("list the inbound message sources"),
+    );
+    if parts.on("send-message") {
+        descriptions.insert("/tell".into(), json!("queue a message for the next turn"));
+    }
+    if parts.on("webhooks") {
+        descriptions.insert("/webhook".into(), json!("add and inspect inbound webhooks"));
+    }
+    if parts.on("file-trigger") {
+        descriptions.insert(
+            "/trigger".into(),
+            json!("list or reload per-path reminder rules"),
+        );
+    }
+    if parts.on("control") {
+        descriptions.insert(
+            "/control".into(),
+            json!("show and manage the remote-control socket"),
+        );
+    }
     json!({
         "name": "inbound",
         "version": env!("CARGO_PKG_VERSION"),
@@ -89,14 +144,9 @@ fn manifest() -> Value {
         "capabilities": caps,
         "tools": tools,
         "commands": commands,
-        "command_descriptions": {
-            "/tell": "queue a message for the next turn",
-            "/webhook": "add and inspect inbound webhooks",
-            "/trigger": "list or reload per-path reminder rules",
-            "/control": "show and manage the remote-control socket",
-            "/inbound": "list the inbound message sources",
-        },
+        "command_descriptions": descriptions,
         "hooks": hooks,
+        "parts": parts.manifest(PARTS),
     })
 }
 
@@ -165,12 +215,17 @@ fn result_of(reply: Option<Value>) -> Value {
 }
 
 /// `agent/before_start` fan-out: join every module's non-empty `{text}`.
-fn before_start(st: &Inbound, req: &Value) -> Value {
-    let replies = [
-        st.send_message(req).0,
-        webhooks::handle_webhooks(&st.wh, req).0,
-        control::handle_control(&st.ctl, req).0,
-    ];
+fn before_start(st: &Inbound, req: &Value, parts: &parts::Parts) -> Value {
+    let mut replies = Vec::new();
+    if parts.on("send-message") {
+        replies.push(st.send_message(req).0);
+    }
+    if parts.on("webhooks") {
+        replies.push(webhooks::handle_webhooks(&st.wh, req).0);
+    }
+    if parts.on("control") {
+        replies.push(control::handle_control(&st.ctl, req).0);
+    }
     let parts: Vec<String> = replies
         .into_iter()
         .filter_map(|r| {
@@ -191,7 +246,7 @@ fn before_start(st: &Inbound, req: &Value) -> Value {
 }
 
 /// `/inbound` — merged-plugin overview with live listener state.
-fn inbound_command(st: &Inbound) -> String {
+fn inbound_command(st: &Inbound, parts: &parts::Parts) -> String {
     let sock = st
         .ctl
         .session
@@ -201,20 +256,46 @@ fn inbound_command(st: &Inbound) -> String {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "not bound yet".into());
-    format!(
-        "gray-inbound {} — one sidecar, four inbound sources:\n\
-         \x20 /tell      queue a message for the next turn (~/.gray/send-message/)\n\
-         \x20 /webhook   HTTP webhooks → turns ({})\n\
-         \x20 /trigger   per-path reminders appended to write results (~/.gray/file-trigger/rules.json)\n\
-         \x20 /control   remote control socket (sock: {})\n\
-         tools: webhook_emit · send_to_session",
-        env!("CARGO_PKG_VERSION"),
-        webhooks::listener_state(&st.wh),
-        sock,
-    )
+    let mut lines: Vec<String> = vec![format!(
+        "gray-inbound {} — one sidecar, four inbound sources:",
+        env!("CARGO_PKG_VERSION")
+    )];
+    if parts.on("send-message") {
+        lines.push(
+            "\x20 /tell      queue a message for the next turn (~/.gray/send-message/)".into(),
+        );
+    }
+    if parts.on("webhooks") {
+        lines.push(format!(
+            "\x20 /webhook   HTTP webhooks → turns ({})",
+            webhooks::listener_state(&st.wh)
+        ));
+    }
+    if parts.on("file-trigger") {
+        lines.push(
+            "\x20 /trigger   per-path reminders appended to write results (~/.gray/file-trigger/rules.json)"
+                .into(),
+        );
+    }
+    if parts.on("control") {
+        lines.push(format!(
+            "\x20 /control   remote control socket (sock: {sock})"
+        ));
+    }
+    let mut tools: Vec<&str> = Vec::new();
+    if parts.on("webhooks") {
+        tools.push("webhook_emit");
+    }
+    if parts.on("control") {
+        tools.push("send_to_session");
+    }
+    if !tools.is_empty() {
+        lines.push(format!("\x20 tools: {}", tools.join(" · ")));
+    }
+    lines.join("\n")
 }
 
-fn handle(st: &Inbound, req: &Value) -> (Option<Value>, bool) {
+fn handle(st: &Inbound, req: &Value, parts: &parts::Parts) -> (Option<Value>, bool) {
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
@@ -229,17 +310,20 @@ fn handle(st: &Inbound, req: &Value) -> (Option<Value>, bool) {
         st.touch_session(&params);
     }
     let result = match method {
-        "plugin/manifest" => manifest(),
-        "agent/before_start" => before_start(st, req),
+        "plugin/manifest" => manifest(parts),
+        "agent/before_start" => before_start(st, req, parts),
         "tool/before" | "tool/after" => {
+            if !parts.on("file-trigger") {
+                return (Some(json!({ "id": id, "result": {} })), false);
+            }
             let (reply, _) = file_trigger::handle_file_trigger(&st.ft, req);
             return (reply, false);
         }
         "tool/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let (reply, _) = match name {
-                "webhook_emit" => webhooks::handle_webhooks(&st.wh, req),
-                "send_to_session" => control::handle_control(&st.ctl, req),
+                "webhook_emit" if parts.on("webhooks") => webhooks::handle_webhooks(&st.wh, req),
+                "send_to_session" if parts.on("control") => control::handle_control(&st.ctl, req),
                 other => {
                     let r =
                         json!({ "content": format!("unknown tool: {other}"), "is_error": true });
@@ -251,11 +335,17 @@ fn handle(st: &Inbound, req: &Value) -> (Option<Value>, bool) {
         "command/run" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             match name {
-                META_COMMAND => json!({ "text": inbound_command(st) }),
-                "/tell" => result_of(st.send_message(req).0),
-                "/webhook" => result_of(webhooks::handle_webhooks(&st.wh, req).0),
-                "/trigger" => result_of(file_trigger::handle_file_trigger(&st.ft, req).0),
-                "/control" => result_of(control::handle_control(&st.ctl, req).0),
+                META_COMMAND => json!({ "text": inbound_command(st, parts) }),
+                "/tell" if parts.on("send-message") => result_of(st.send_message(req).0),
+                "/webhook" if parts.on("webhooks") => {
+                    result_of(webhooks::handle_webhooks(&st.wh, req).0)
+                }
+                "/trigger" if parts.on("file-trigger") => {
+                    result_of(file_trigger::handle_file_trigger(&st.ft, req).0)
+                }
+                "/control" if parts.on("control") => {
+                    result_of(control::handle_control(&st.ctl, req).0)
+                }
                 _ => json!({ "text": format!("unknown command {name} — try {META_COMMAND}") }),
             }
         }
@@ -272,8 +362,9 @@ fn handle(st: &Inbound, req: &Value) -> (Option<Value>, bool) {
 }
 
 fn main() {
+    let parts = parts::Parts::load("inbound", PARTS);
     if std::env::args().nth(1).as_deref() == Some("manifest") {
-        println!("{}", manifest());
+        println!("{}", manifest(&parts));
         return;
     }
     let st = Inbound::new();
@@ -306,7 +397,7 @@ fn main() {
     });
 
     for req in work_rx {
-        let (reply, exit) = handle(&st, &req);
+        let (reply, exit) = handle(&st, &req, &parts);
         if let Some(reply) = reply {
             let mut o = out.lock().expect("stdout");
             let _ = writeln!(o, "{reply}");
